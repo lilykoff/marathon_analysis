@@ -1,0 +1,820 @@
+---
+title: "BST 260 Final Project: Boston Marathon Results Analysis"
+author: "Lily Koffman"
+date: "12/12/2019"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(shiny)
+library(tidyverse)
+library(lubridate)
+library(reshape2)
+library(dplyr)
+library(shiny)
+library(shinythemes)
+```
+
+## Introduction
+I'm a lifelong endurance athlete and I'll be running my first Boston Marathon this April. As such, I wanted to explore historical Boston Marathon results with both visualization and analysis. Specifically, I wanted to (1) investigate and visualize how pacing patterns differ across gender, age groups, and runner ability and (2) use historical results to try to predict a runner's finish time based on their demographic characteristics. Some inspiration came from analyses like this about running shoes: https://www.nytimes.com/interactive/2019/12/13/upshot/nike-vaporfly-next-percent-shoe-estimates.html and this about pacing: https://medium.com/running-with-data/how-to-pace-like-an-elite-in-boston-4abf26e64bf8. 
+
+## Data
+Code to scrape results from the marathon was adapted from https://github.com/llimllib/bostonmarathon; then, results from each edition of the Boston Marathon from 2011 to 2019 were scraped from the BAA website. The raw data included each athlete's name, bib number, age, gender, home city, home state, home country, overall place, division/category place, official finish time, official half marathon time, and split time for 5, 10, 15, 20, 25, 30, 35, and 40 kilometers.
+
+All raw data files can be accessed on my github repository: 
+https://github.com/lilykoff/boston_marathon_analysis. Additionally, the file with all of the results compiled can be found here: https://drive.google.com/file/d/14cARNwhABN-vK2f5ofAEvmVpzbbYIHfM/view?usp=sharing. 
+
+Then, several data cleaning and manipulation processes were undertakem. 
+
+* ID for "year" was added to the data for each year, and then the data for all the years were combined
+* All time variables were imported as strings, i.e. a finish time of 3 hours, 1 minute, 30 seconds appeared in the data as "3:01:01". These formats were converted to an "hms" format and then converted to minutes 
+* The average pace per-mile for each five-kilometer segment was calculated 
+These average pages were used to calculate the percent change in pace from each five-kilometer segment to the next five-kilometer segment. For example, if a runner ran the first 5k at 5:00/mile pace and the second 5k at 5:30/mile pace, the percent change from 5 to 10 kilometers would be -10%. In this method of calculation, getting faster equates to a positive percent change and getting slower equates to a negative percent change 
+* Percent change in pace from the first to the second half of the marathon was also calculated
+* The continuous variable "age" was recoded into the age groups used by the marathon organizers
+* These age groups and finish times were used to guess whether the runner entered the race as a qualifier or fundraiser. It was assumed that if the runner finished within 10% of the qualification standard for their age group and gender, they qualified for the race. This creates a buffer because Boston is traditionally a slower course than many other qualifying courses
+* An indicator variable for whether the athlete is a US Citizen was created
+
+A detailed description of this process is included below: 
+
+```{r, cache=T}
+# read in the data 
+results_2019 <- read.csv("marathon_results_2019.csv", stringsAsFactors = FALSE)
+results_2018 <- read.csv("marathon_results_2018.csv", stringsAsFactors = FALSE)
+results_2017 <- read.csv("marathon_results_2017.csv", stringsAsFactors = FALSE)
+results_2016 <- read.csv("marathon_results_2016.csv", stringsAsFactors = FALSE)
+results_2015 <- read.csv("marathon_results_2015.csv", stringsAsFactors = FALSE)
+results_2014 <- read.csv("marathon_results_2014.csv", stringsAsFactors = FALSE)
+results_2013 <- read.csv("marathon_results_2013.csv", stringsAsFactors = FALSE)
+results_2012 <- read.csv("marathon_results_2012.csv", stringsAsFactors = FALSE)
+results_2011 <- read.csv("marathon_results_2011.csv", stringsAsFactors = FALSE)
+```
+
+## Data Manipulation 
+
+First, I added a year identifier variable for each year, and then merged each year's results into one file.
+
+```{r, cache=T}
+# add year identifier
+results_2019 <- results_2019 %>% mutate(Year="2019")
+results_2018 <- results_2018 %>% mutate(Year="2018")
+results_2017 <- results_2017 %>% mutate(Year="2017")
+results_2016 <- results_2016 %>% mutate(Year="2016")
+results_2015 <- results_2015 %>% mutate(Year="2015")
+results_2014 <- results_2014 %>% mutate(Year="2014")
+results_2013 <- results_2013 %>% mutate(Year="2013")
+results_2012 <- results_2012 %>% mutate(Year="2012")
+results_2011 <- results_2011 %>% mutate(Year="2011")
+
+# combine results 
+results_all <- rbind(results_2019, results_2018, results_2017, results_2016,
+                     results_2015, results_2014, results_2013, results_2012,
+                     results_2011)
+```
+
+Then, I created many variables to facilitate analysis. First, I created age group variable that corresponds to BAA age groups.
+
+```{r, cache=T}
+results_all <- results_all %>% mutate(
+  agegroup = case_when(
+    Age <= 34 ~ "18-34",
+    Age > 34 & Age <= 39 ~ "35-39",
+    Age > 39 & Age <= 44 ~ "40-44",
+    Age > 44 & Age <= 49 ~ "45-49",
+    Age > 49 & Age <= 54 ~ "50-54",
+    Age > 54 & Age <= 59 ~ "55-59",
+    Age > 59 & Age <= 64 ~ "60-64",
+    Age > 64 & Age <= 69 ~ "65-69",
+    Age > 69 & Age <= 74 ~ "70-74",
+    Age > 74 & Age <= 79 ~ "75-79",
+    Age > 79 ~ "80+",
+    TRUE ~ NA_character_
+  )
+)
+```
+
+I converted times from strings to hms format, and then used kilometer to miles conversion to calculate each runner's projected finish time at each 5 kilometer mark, each runner's average pace for every 5 kilometer segment, and each runner's cumulative average page at each 5 kilometer mark. 
+
+```{r, cache=T, warning=F}
+results_all <- results_all %>% dplyr::select(Name, Age, agegroup, M.F, City, State, Country,
+                                               X5K, X10K, X15K, X20K, Half, X25K, X30K, X35K,
+                                               X35K, X40K, Pace, Official.Time, Overall, Gender,
+                                               Division, Year) %>%
+  mutate(
+    X5K = hms(X5K),
+    X10K = hms(X10K),
+    X15K = hms(X15K),
+    X20K = hms(X20K),
+    Half = hms(Half),
+    X25K = hms(X25K),
+    X30K = hms(X30K),
+    X35K = hms(X35K),
+    X40K = hms(X40K),
+    Pace = hms(Pace),
+    Official.Time = hms(Official.Time),
+    M.F = as.factor(M.F),
+    Country = as.factor(Country),
+    agegroup = as.factor(agegroup)
+  )
+
+
+results_all <- results_all %>%
+  mutate(
+    Proj.Finish.5K = round(seconds_to_period(period_to_seconds(X5K)*42.165/5)),
+    Proj.Finish.10K = round(seconds_to_period(period_to_seconds(X10K)*42.165/10)),
+    Proj.Finish.15K = round(seconds_to_period(period_to_seconds(X15K)*42.165/15)),
+    Proj.Finish.20K = round(seconds_to_period(period_to_seconds(X20K)*42.165/20)),
+    Proj.Finish.25K = round(seconds_to_period(period_to_seconds(X25K)*42.165/25)),
+    Proj.Finish.30K = round(seconds_to_period(period_to_seconds(X30K)*42.165/30)),
+    Proj.Finish.35K = round(seconds_to_period(period_to_seconds(X35K)*42.165/35)),
+    Proj.Finish.40K = round(seconds_to_period(period_to_seconds(X40K)*42.165/40)),
+    Proj.Finish.Half = round(seconds_to_period(period_to_seconds(Half)*2)),
+    First5k = round(seconds_to_period(period_to_seconds(X5K)/3.107)),
+    Second5k = round(seconds_to_period(period_to_seconds(X10K - X5K)/3.107)), 
+    Third5k = round(seconds_to_period(period_to_seconds(X15K - X10K)/3.107)), 
+    Fourth5k = round(seconds_to_period(period_to_seconds(X20K - X15K)/3.107)), 
+    Fifth5k = round(seconds_to_period(period_to_seconds(X25K - X20K)/3.107)), 
+    Sixth5k = round(seconds_to_period(period_to_seconds(X30K - X25K)/3.107)), 
+    Seventh5k = round(seconds_to_period(period_to_seconds(X35K - X30K)/3.107)), 
+    Eigth5k = round(seconds_to_period(period_to_seconds(X40K - X35K)/3.107)), 
+    FiveAvg = round(seconds_to_period(period_to_seconds(X5K)*1.609/5)),
+    TenAvg = round(seconds_to_period(period_to_seconds(X10K)*1.609/10)),
+    FifteenAvg = round(seconds_to_period(period_to_seconds(X15K)*1.609/15)),
+    TwentyAvg = round(seconds_to_period(period_to_seconds(X20K)*1.609/20)),
+    TwentyFiveAvg = round(seconds_to_period(period_to_seconds(X25K)*1.609/25)),
+    ThirtyAvg = round(seconds_to_period(period_to_seconds(X30K)*1.609/30)),
+    ThirtyFiveAvg = round(seconds_to_period(period_to_seconds(X35K)*1.609/35)),
+    FourtyAvg = round(seconds_to_period(period_to_seconds(X40K)*1.609/40)),
+    HalfAvg = round(seconds_to_period(period_to_seconds(Half)/13.1)),
+  ) %>% dplyr::select(
+    Name, Age, agegroup, M.F, City, State, Country, Proj.Finish.5K, Proj.Finish.10K,
+    Proj.Finish.15K, Proj.Finish.20K, Proj.Finish.25K, Proj.Finish.30K,
+    Proj.Finish.35K, Proj.Finish.40K, Proj.Finish.Half, First5k, Second5k,
+    Third5k, Fourth5k, Fifth5k, Sixth5k, Seventh5k, Eigth5k, FiveAvg, TenAvg, 
+    FifteenAvg, TwentyAvg, TwentyFiveAvg, ThirtyAvg, ThirtyFiveAvg, FourtyAvg,
+    HalfAvg, Pace, Official.Time, Overall, Gender, Division, X5K, X10K, X15K, X20K,
+    X25K,X30K,X35K,X40K,Half, Year)
+```
+
+I converted all the time formats from hms periods to minutes for ease of plotting and interpretation. 
+
+```{r, cache=T, warning=F}
+results_all_minutes <- results_all %>% mutate(
+  Proj.Finish.5K = period_to_seconds(Proj.Finish.5K)/60,
+  Proj.Finish.10K = period_to_seconds(Proj.Finish.10K)/60,
+  Proj.Finish.15K = period_to_seconds(Proj.Finish.15K)/60,
+  Proj.Finish.20K = period_to_seconds(Proj.Finish.20K)/60,
+  Proj.Finish.25K = period_to_seconds(Proj.Finish.25K)/60,
+  Proj.Finish.30K = period_to_seconds(Proj.Finish.30K)/60,
+  Proj.Finish.35K = period_to_seconds(Proj.Finish.35K)/60,
+  Proj.Finish.40K = period_to_seconds(Proj.Finish.40K)/60,
+  Proj.Finish.Half = period_to_seconds(Proj.Finish.Half)/60,
+  First5k = period_to_seconds(First5k)/60,
+  Second5k = period_to_seconds(Second5k)/60, 
+  Third5k = period_to_seconds(Third5k)/60, 
+  Fourth5k = period_to_seconds(Fourth5k)/60,
+  Fifth5k = period_to_seconds(Fifth5k)/60, 
+  Sixth5k = period_to_seconds(Sixth5k)/60,
+  Seventh5k = period_to_seconds(Seventh5k)/60,
+  Eigth5k = period_to_seconds(Eigth5k)/60,
+  FiveAvg = period_to_seconds(FiveAvg)/60,
+  TenAvg = period_to_seconds(TenAvg)/60,
+  FifteenAvg = period_to_seconds(FifteenAvg)/60,
+  TwentyAvg = period_to_seconds(TwentyAvg)/60,
+  TwentyFiveAvg = period_to_seconds(TwentyFiveAvg)/60,
+  ThirtyAvg = period_to_seconds(ThirtyAvg)/60,
+  ThirtyFiveAvg = period_to_seconds(ThirtyFiveAvg)/60,
+  FourtyAvg = period_to_seconds(FourtyAvg)/60,
+  HalfAvg = period_to_seconds(HalfAvg)/60,
+  X5K = period_to_seconds(X5K)/60,
+  X10K = period_to_seconds(X10K)/60,
+  X15K = period_to_seconds(X15K)/60,
+  X20K = period_to_seconds(X20K)/60,
+  X25K = period_to_seconds(X25K)/60,
+  X30K = period_to_seconds(X30K)/60,
+  X35K = period_to_seconds(X35K)/60,
+  X40K = period_to_seconds(X40K)/60,
+  Half = period_to_seconds(Half)/60,
+  Pace = period_to_seconds(Pace)/60,
+  Official.Time = period_to_seconds(Official.Time)/60
+)
+```
+
+I created categorical speed groups based on finish times. 
+
+```{r, cache=T}
+results_all_minutes <- results_all_minutes %>%
+  mutate(
+    speedgroup = case_when(
+      Official.Time < 130 ~ "Sub 2:10",
+      Official.Time >=130 & Official.Time < 140 ~ "2:10-2:20",
+      Official.Time >=140 & Official.Time < 150 ~ "2:20-2:30",
+      Official.Time >=150 & Official.Time < 160 ~ "2:30-2:40",
+      Official.Time >=160 & Official.Time < 170 ~ "2:40-2:50",
+      Official.Time >=170 & Official.Time < 180 ~ "2:50-3:00",
+      Official.Time >=180 & Official.Time < 190 ~ "3:00-3:10",
+      Official.Time >=190 & Official.Time < 200 ~ "3:10-3:20",
+      Official.Time >=200 & Official.Time < 210 ~ "3:20-3:30",
+      Official.Time >=210 & Official.Time < 220 ~ "3:30-3:40",
+      Official.Time >=220 & Official.Time < 230 ~ "3:40-3:50",
+      Official.Time >=230 & Official.Time < 240 ~ "3:50-4:00",
+      Official.Time >=240 & Official.Time < 270 ~ "4:00-4:30",
+      Official.Time >=270 & Official.Time < 300 ~ "4:30-5:00",
+      Official.Time >=300 & Official.Time < 330 ~ "5:00-5:30",
+      Official.Time >=330 & Official.Time < 360 ~ "5:30-6:00",
+      Official.Time >=360 & Official.Time < 390 ~ "6:00-6:30",
+      Official.Time >=390 & Official.Time < 420 ~ "6:30-7:00",
+      TRUE ~ "7:00+",
+    )
+  )
+```
+
+I calculated the percent change for each five kilometer segment from the previous segment, and calcualted the percent difference for each five kilometer segment from the average pace of the entire race. I also calcualted the percent change in pace from the second half to the first half of the race. 
+
+```{r, cache=T}
+results_all_minutes <- results_all_minutes %>% mutate(
+  Change5to10 = (First5k-Second5k)/First5k*100,
+  Change10to15 = (Second5k-Third5k)/Second5k*100,
+  Change15to20 = (Third5k-Fourth5k)/Third5k*100,
+  Change20to25 = (Fourth5k-Fifth5k)/Fourth5k*100,
+  Change25to30 = (Fifth5k-Sixth5k)/Fifth5k*100,
+  Change30to35 = (Sixth5k-Seventh5k)/Sixth5k*100,
+  Change35to40 = (Seventh5k-Eigth5k)/Seventh5k*100,
+  First5 = (Pace-First5k)/Pace*100,
+  Second5 = (Pace-Second5k)/Pace*100,
+  Third5 = (Pace-Third5k)/Pace*100,
+  Fourth5 = (Pace-Fourth5k)/Pace*100,
+  Fifth5 = (Pace-Fifth5k)/Pace*100,
+  Sixth5 = (Pace-Sixth5k)/Pace*100,
+  Seventh5 = (Pace-Seventh5k)/Pace*100,
+  Eigth5 = (Pace-Eigth5k)/Pace*100,
+  SecondHalf = Official.Time-Half,
+  HalfPct = (Pace-HalfAvg)/Pace*100,
+  SecondHalfAvg = SecondHalf/13.1,
+  SecondHalfPct = (Pace-SecondHalfAvg)/Pace*100,
+  ChangeHalf = (Half - SecondHalf)/Half*100
+)
+```
+
+I created a variable to estimate whether the runner qualified or fundraised to enter the race. I assumed that if the runner finished within 10\% of the qualifying time needed for his or her age group, he or she qualified for the race. This accounts for the fact that Boston is slower than many other marathons. 
+
+```{r, cache=T}
+results_all_minutes <- results_all_minutes %>% mutate(
+  qualifier = case_when(
+    M.F=="F"&agegroup=="18-34"&Official.Time<231 ~ "Qualifier",
+    M.F=="F"&agegroup=="35-39"&Official.Time<236.5 ~ "Qualifier",
+    M.F=="F"&agegroup=="40-44"&Official.Time<242 ~ "Qualifier",
+    M.F=="F"&agegroup=="45-49"&Official.Time<253 ~ "Qualifier",
+    M.F=="F"&agegroup=="50-54"&Official.Time<258.5 ~ "Qualifier",
+    M.F=="F"&agegroup=="55-59"&Official.Time<269.5 ~ "Qualifier",
+    M.F=="F"&agegroup=="60-64"&Official.Time<286 ~ "Qualifier",
+    M.F=="F"&agegroup=="65-69"&Official.Time<302.5 ~ "Qualifier",
+    M.F=="F"&agegroup=="70-74"&Official.Time<319 ~ "Qualifier",
+    M.F=="F"&agegroup=="75-79"&Official.Time<335.5 ~ "Qualifier",
+    M.F=="F"&agegroup=="80+"&Official.Time<352 ~ "Qualifier",
+    M.F=="M"&agegroup=="18-34"&Official.Time<198 ~ "Qualifier",
+    M.F=="M"&agegroup=="35-39"&Official.Time<203.5 ~ "Qualifier",
+    M.F=="M"&agegroup=="40-44"&Official.Time<209 ~ "Qualifier",
+    M.F=="M"&agegroup=="45-49"&Official.Time<220 ~ "Qualifier",
+    M.F=="M"&agegroup=="50-54"&Official.Time<225.5 ~ "Qualifier",
+    M.F=="M"&agegroup=="55-59"&Official.Time<236.5 ~ "Qualifier",
+    M.F=="M"&agegroup=="60-64"&Official.Time<253 ~ "Qualifier",
+    M.F=="M"&agegroup=="65-69"&Official.Time<269.5 ~ "Qualifier",
+    M.F=="M"&agegroup=="70-74"&Official.Time<286 ~ "Qualifier",
+    M.F=="M"&agegroup=="75-79"&Official.Time<302.5 ~ "Qualifier",
+    M.F=="M"&agegroup=="80+"&Official.Time<319 ~ "Qualifier",
+    TRUE ~ "Not Qualifier"
+  )
+)
+```
+
+Finally, I exported the data so these steps weren't performed every time I ran my shiny app. 
+
+```{r, eval=F}
+write.csv(results_all_minutes, "results_all.csv")
+```
+
+## Shiny App 
+
+I created a Shiny App to perform visualization and analysis. The code for the shiny app is below; however; view the shiny App below or follow the link here: https://lkoffman2018.shinyapps.io/boston-results/
+
+```{r, cache=T, echo=F}
+  # read in data 
+results_all <- results_all_minutes
+# convert strings to factors 
+results_all$qualifier <- as.factor(results_all$qualifier)
+results_all$M.F <- as.factor(results_all$M.F)
+results_all$agegroup <- as.factor(results_all$agegroup)
+results_all$Country <- as.factor(results_all$Country)
+results_all$Year <- as.factor(results_all$Year)
+# create one more variable of interest: whether runner is a US citizen
+results_all <- results_all %>% mutate(
+  US_Citizen = case_when(
+    Country=="USA" ~ "Yes",
+    TRUE ~ "No"
+  )
+)
+results_all$US_Citizen <- as.factor(results_all$US_Citizen)
+```
+
+```{r, echo=F}
+################################################## UI 
+shinyApp(
+ui <- fluidPage(theme = shinytheme("darkly"),
+                tabsetPanel(type="tabs",
+                            
+                            # tab 1: allow user to compare finish times based on certain characteristics 
+                            # user selects age and qualification status
+                            # output is overlapping histogram of finish times by gender
+                            tabPanel("Basic Demographics: Finish Times",
+                                     pageWithSidebar(
+                                       headerPanel('Compare Finish Time by Gender'),
+                                       sidebarPanel(
+                                         selectInput('age_dem1', 'Choose an Age Group', levels(results_all$agegroup)),
+                                         selectInput('qual_dem1', 'Qualifier', levels(results_all$qualifier))),
+                                       mainPanel(
+                                         plotOutput('plot_dem1')
+                                       )
+                                     )),
+                            
+                            # tab 2: displays four different "summaries" of participants
+                            # qualification status by gender
+                            # qualification status by age
+                            # gender by age 
+                            # age by gender 
+                            tabPanel("Basic Demographics: Participants",
+                                     pageWithSidebar(
+                                       headerPanel('Compare Participants'),
+                                       sidebarPanel(
+                                         radioButtons('comp', 'Choose Graph to Display', c("Qualification Status by Gender",
+                                                                                           "Qualification Status by Age Group",
+                                                                                           "Gender by Age Group",
+                                                                                           "Age Group by Gender"))),
+                                       mainPanel(
+                                         plotOutput('plotbar')
+                                       )
+                                     )),
+                            
+                            # tab 3: visualizes finish times by year
+                            # user selects age and qualification status
+                            # output is a box plot of the distribution of each genders' finish times by year 
+                            tabPanel("Finish Times by Year",
+                                     pageWithSidebar(
+                                       headerPanel('Compare Finish Times By Year'),
+                                       sidebarPanel(
+                                         selectInput('ageyear', 'Choose an Age Group', levels(results_all$agegroup)),
+                                         selectInput('qyear', 'Choose Qualifying Status', levels(results_all$qualifier))),
+                                       mainPanel(
+                                         plotOutput('plotyear') #boxplot by year
+                                       )
+                                     )),
+                            
+                            # tab 4: visualize pacing strategy by gender 
+                            # user selects age group and qualification status 
+                            # output is box plot of percent change in each 5k segment from previous 5k segment comparing genders
+                            tabPanel("Pacing Strategy by Gender",
+                                     pageWithSidebar(
+                                       headerPanel('Compare Genders within Age Group and Qualficiation Status'),
+                                       sidebarPanel(
+                                         selectInput('age1', 'Choose an Age Group', levels(results_all$agegroup)),
+                                         selectInput('qual', 'Qualifier', levels(results_all$qualifier))),
+                                       mainPanel(
+                                         plotOutput('plot1')
+                                       )
+                                     )),
+                            
+                            # tab 5: visualize pacing by age 
+                            # user selects gender and qualification status and chooses two age groups to compare 
+                            # output is box plot of percent change in each 5k segment from previous 5k segment comparing age groups 
+                            tabPanel("Pacing Strategy by Age",
+                                     pageWithSidebar(
+                                       headerPanel('Compare Age Groups within Gender and Qualification Status'),
+                                       sidebarPanel(
+                                         selectInput('gender', 'Choose a Gender', levels(results_all$M.F)),
+                                         selectInput('age_a', 'Choose an Age Group', levels(results_all$agegroup)),
+                                         selectInput('age_b', 'Choose a Second Age Group', levels(results_all$agegroup)),
+                                         selectInput('qual2', 'Qualifier', levels(results_all$qualifier))),
+                                       mainPanel(
+                                         plotOutput('plot2')
+                                       )
+                                     )),
+                            
+                            # tab 6: visualize pacing by qualification status 
+                            # user selects gender and age group
+                            # output is box plot of percent change in each 5k segment from previous 5k segment comparing qualification status
+                            tabPanel("Pacing Strategy by Qualification",
+                                     pageWithSidebar(
+                                       headerPanel('Compare Qualifiers within Gender and Age'),
+                                       sidebarPanel(
+                                         selectInput('gender2', 'Choose a Gender', levels(results_all$M.F)),
+                                         selectInput('age', 'Choose an Age Group', levels(results_all$agegroup))),
+                                       mainPanel(
+                                         plotOutput('plot3')
+                                       )
+                                     )),
+                            
+                            # tab 7: runs a two sample t-test
+                            # comparison is on percent change from first half marathon pace to second half marathon pacce 
+                            # possible groups to compare: gender, age, qualification status
+                            # user selects variable they want to compare by
+                            # conditional logic then displays the other variables to fix and the variables to specify comparison for
+                            # user must also specify equal variance and type of test 
+                            # output is key summary statistics, test result, and histogram comparing the distributions of each group
+                            tabPanel("Hypothesis Testing",
+                                     pageWithSidebar(
+                                       headerPanel('Perform a T-test'),
+                                       sidebarPanel(
+                                         selectInput('comparison', 'Choose Variable to Compare By', c("Age", "Gender", "Qualification Status")),
+                                         conditionalPanel(
+                                           condition = "input.comparison=='Age'",
+                                           selectInput("genderfilter", "Stratify by Gender", levels(results_all$M.F)),
+                                           selectInput("yearfilter", "Stratify by Year", levels(results_all$Year)),
+                                           selectInput("qfilter", "Stratify by Qualification", levels(results_all$qualifier)),
+                                           selectInput("age1c", "Age Group 1 to Compare", levels(results_all$agegroup)),
+                                           selectInput("age2c", "Age Group 2 to Compare", levels(results_all$agegroup), selected=2)
+                                         ),
+                                         conditionalPanel(
+                                           condition = "input.comparison=='Gender'",
+                                           selectInput("agefilter", "Stratify by Age", levels(results_all$agegroup)),
+                                           selectInput("yearfilter2", "Stratify by Year", levels(results_all$Year)),
+                                           selectInput("qfilter2", "Stratify by Qualification", levels(results_all$qualifier))
+                                         ),
+                                         conditionalPanel(
+                                           condition = "input.comparison=='Qualification Status'",
+                                           selectInput("genderfilter2", "Stratify by Gender", levels(results_all$M.F)),
+                                           selectInput("agefilter2", "Stratify by Age", levels(results_all$agegroup)),
+                                           selectInput("yearfilter3", "Stratify by Year", levels(results_all$Year))
+                                         ),
+                                         selectInput('tail', 'Type of Test', choices = c("Equal" = "two.sided", 
+                                                                                         "Less" = "less",
+                                                                                         "Greater" = "greater")),
+                                         radioButtons("varequal",
+                                                      "Assume Samples Have Equal Variance?",
+                                                      choices = c("Yes" = "y",
+                                                                  "No" = "n"))
+                                       ),
+                                       mainPanel(fluidRow(column(10, offset = 1,
+                                                                 plotOutput('graph'))),
+                                                 fluidRow(column(8, offset = 1,
+                                                                 h2("Null Hypothesis:"),
+                                                                 p("There is no difference in the percent change in pace from the first to the second half of the marathon
+                                                     between the two groups being compared among the chosen strata"),
+                                                                 h2("Summary statistics"),
+                                                                 tableOutput('parametric'),
+                                                                 h2("Test Results"),
+                                                                 tableOutput('results')))
+                                       )
+                                     )),
+                            
+                            # tab 8: linear regression
+                            # user selects which variables they want to include in the regression
+                            # output is regression output
+                            # conditional logic then lets user input values and predict finish time based on regression
+                            # adjusted r2 also included
+                            tabPanel("Linear Regression",
+                                     pageWithSidebar(
+                                       headerPanel('Create a Linear Regression Model'),
+                                       sidebarPanel(
+                                         checkboxGroupInput('explanvars','Select the explanatory variables to include', choices = c("Age" = "Age",
+                                                                                                                                    "Age Group" = "agegroup",
+                                                                                                                                    "Gender" = "M.F",
+                                                                                                                                    "Year" = "Year",
+                                                                                                                                    "First 5K Pace" = "First5k",
+                                                                                                                                    "Qualifier" = "qualifier",
+                                                                                                                                    "US Citizen" = "US_Citizen")),
+                                         tags$b("Choose Inputs to Predict Finish Time Based on Model:"),
+                                         conditionalPanel(
+                                           condition = "input.explanvars.includes('Age')",
+                                           numericInput("agepred", "Age", value=25, min = min(results_all$Age), 
+                                                        max = max(results_all$Age))
+                                         ),
+                                         conditionalPanel(
+                                           condition = "input.explanvars.includes('agegroup')",
+                                           selectInput("agegpred", "Age Group", choices=c(levels(results_all$agegroup)))
+                                         ),
+                                         conditionalPanel(
+                                           condition = "input.explanvars.includes('M.F')",
+                                           selectInput("genpred", "Gender", choices=c("Female" = "F", "Male" = "M"))
+                                         ),
+                                         conditionalPanel(
+                                           condition = "input.explanvars.includes('Year')",
+                                           selectInput("ypred", "Year", choices=levels(results_all$Year))
+                                         ),
+                                         conditionalPanel(
+                                           condition = "input.explanvars.includes('First5k')",
+                                           sliderInput("timepred", "First 5K Pace", min = 4, max=18, value=8, step =0.5)
+                                         ),
+                                         conditionalPanel(
+                                           condition = "input.explanvars.includes('qualifier')",
+                                           selectInput("qpred", "Qualifier", choices=c("Qualifier", "Not Qualifier"))
+                                         ),
+                                         conditionalPanel(
+                                           condition = "input.explanvars.includes('US_Citizen')",
+                                           selectInput("cpred", "US Citizen", choices=c("Yes", "No"))
+                                         ),
+                                         p("Predicted Finish Time (Hours):"),
+                                         verbatimTextOutput("pred")
+                                         
+                                       ),
+                                       mainPanel(fluidRow(column(10, offset = 1,
+                                                                 h2("Model Summary"),
+                                                                 verbatimTextOutput("summary"),
+                                                                 h3("Adjusted R Squared"),
+                                                                 verbatimTextOutput("ar2")
+                                       )
+                                       
+                                       
+                                       ))))
+                )),
+
+###################################### SERVER 
+server <- function(input, output) {
+  # tab 1 output 
+  output$plot_dem1 <- renderPlot({dat <- results_all %>% filter(agegroup==input$age_dem1&qualifier==input$qual_dem1)
+  ggplot(dat, aes(x=Official.Time))+geom_histogram(data = subset(dat, M.F=="F"), aes(fill="red"), alpha=.4)+
+    geom_histogram(data=subset(dat, M.F=="M"), aes(fill="blue"), alpha=.4)+
+    labs(x = "Official Time (minutes)", y= "Count", title = "Finish Times by Gender")+theme_minimal()+
+    scale_fill_manual("Gender", 
+                      values =c('blue'='blue','red'='red'), labels = c("Male", "Female"))
+  
+  })
+  
+  # tab 2 output 
+  output$plotbar <- renderPlot({
+    if(input$comp=="Qualification Status by Gender"){
+      ggplot(results_all, aes(x=qualifier,  group=M.F)) + 
+        geom_bar(aes(y = ..prop.., fill = factor(..x..)), stat="count") +
+        geom_text(aes( label = scales::percent(..prop..),
+                       y= ..prop.. ), stat= "count", vjust = -.5) +
+        labs(title = "Qualification Status by Gender", y = "Percent of Participants", x = "Qualification Status")+
+        facet_grid(~as.factor(M.F)) +
+        scale_y_continuous(labels = scales::percent)+theme(legend.position = "none")}
+    else if(input$comp=="Qualification Status by Age Group"){
+      ggplot(results_all, aes(x=qualifier,  group=agegroup)) + 
+        geom_bar(aes(y = ..prop.., fill = factor(..x..)), stat="count") +
+        labs(title = "Qualification Status by Age Group", y = "Percent of Participants", x = "Qualification Status")+
+        facet_grid(~agegroup) +
+        scale_y_continuous(labels = scales::percent)+theme(legend.position = "none")+
+        theme(axis.text.x = element_text(angle=90))
+    }
+    else if(input$comp=="Gender by Age Group"){
+      ggplot(results_all, aes(x=agegroup,  group=M.F)) + 
+        geom_bar(aes(y = ..prop.., fill = factor(..x..)), stat="count") +
+        labs(title = "Gender by Age Group", y = "Percent of Participants", x ="Age Group")+
+        facet_grid(~M.F) +
+        scale_y_continuous(labels = scales::percent)+theme(legend.position = "none")+
+        theme(axis.text.x = element_text(angle=45))
+    }
+    else{
+      ggplot(results_all, aes(x=M.F,  group=agegroup)) + 
+        geom_bar(aes(y = ..prop.., fill = factor(..x..)), stat="count") +
+        labs(title = "Age Group by Gender", y = "Percent of Participants", x = "Gender")+
+        facet_grid(~agegroup) +
+        scale_y_continuous(labels = scales::percent)+theme(legend.position = "none")
+    }
+  })
+  
+  # tab 3 output 
+  output$plotyear <- renderPlot({results_all %>% filter(qualifier==input$qyear&agegroup==input$ageyear) %>%
+      ggplot(aes(x=Year, y=Official.Time))+geom_boxplot(aes(col=M.F))+labs(
+        x="Year", y = "Official Time", title = "Distribution of Times by Year")+theme_minimal()+
+      scale_color_manual("Gender", values = c("red", "blue"), labels = c("red" = "Female", "blue" = "Male"))
+    
+  })
+  
+  # tab 4 output 
+  output$plot1 <- renderPlot({results_all %>% filter(agegroup==input$age1&qualifier==input$qual) %>%
+      select(Name, agegroup, Change5to10, Change10to15, Change15to20, 
+             Change20to25, Change25to30, Change30to35,Change35to40, M.F) %>% melt(id = c("Name", "agegroup", "M.F"))%>%
+      filter(value>-25&value<25)%>%ggplot(aes(x=as.factor(variable), y = value, color=M.F))+geom_boxplot()+
+      labs(x = "Kilometer", y = "Percent Change in Pace", title = "Pacing Strategy by Gender")+scale_color_manual(name = "Gender",  values=c("blue", "red"), labels = c("blue" = "Male", "red" = "Female"))+theme_minimal()
+    
+  })
+  
+  # tab 5 output 
+  output$plot2 <- renderPlot({results_all %>% filter(M.F==input$gender&qualifier==input$qual2&agegroup==input$age_a|agegroup==input$age_b) %>%
+      select(Name, agegroup, Change5to10, Change10to15, Change15to20, 
+             Change20to25, Change25to30, Change30to35,Change35to40) %>% melt(id = c("Name", "agegroup"))%>%
+      filter(value>-25&value<25)%>%ggplot(aes(x=as.factor(variable), y = value, color=agegroup))+geom_boxplot()+
+      labs(x = "Kilometer", y = "Percent Change in Pace", title = "Pacing Strategy by Age Group")+scale_color_manual(name = "Age Group", values=c("red", "blue"))+theme_minimal()
+    
+  })
+  
+  # tab 6 output 
+  output$plot3 <- renderPlot({results_all %>% filter(M.F==input$gender2&agegroup==input$age) %>%
+      select(Name, agegroup, qualifier, Change5to10, Change10to15, Change15to20, 
+             Change20to25, Change25to30, Change30to35,Change35to40) %>% melt(id = c("Name", "qualifier", "agegroup"))%>%
+      filter(value>-100)%>%ggplot(aes(x=as.factor(variable), y = value, color=qualifier))+geom_boxplot()+
+      labs(x = "Kilometer", y = "Percent Change in Pace", title = "Pacing Strategy by Qualification")+scale_color_manual(name = "Qualifier", values=c("red", "blue"))+theme_minimal()
+    
+  })
+  
+  # tab 7 output, overlapping histograms
+  output$graph <- renderPlot({
+    if(input$comparison=="Age"){
+      dat <- results_all %>% filter(agegroup==input$age1c|agegroup==input$age2c) %>%
+        filter(M.F==input$genderfilter&qualifier==input$qfilter&Year==input$yearfilter) %>%
+        select(Name, agegroup, ChangeHalf) 
+      ggplot(dat,aes(x=ChangeHalf))+geom_histogram(data = subset(dat, agegroup==input$age1c),aes(
+        fill="blue"), alpha=.4)+geom_histogram(data = subset(dat, agegroup==input$age2c), aes(fill="red"), alpha=.4)+labs(
+          x = "Percent Change in Pace From First to Second Half of Race", y = "Count",
+          title = "Pace Change by Age Group"
+        )+scale_fill_manual(name = "Age Group", values = c("blue", "red"), labels = c("blue" = paste(input$age1c), "red" = paste(input$age2c)))+theme_minimal()
+    }
+    else if(input$comparison=="Gender"){
+      dat <- results_all %>% 
+        filter(agegroup==input$agefilter&qualifier==input$qfilter2&Year==input$yearfilter2) %>%
+        select(Name, M.F, ChangeHalf) 
+      ggplot(dat, aes(x=ChangeHalf))+geom_histogram(data = subset(dat, M.F=="M"),aes(
+        fill="blue"), alpha=.4)+geom_histogram(data=subset(dat, M.F=="F"),aes(fill="red"),alpha=.4)+labs(
+          x = "Percent Change in Pace From First to Second Half of Race", y = "Count",
+          title = "Pace Change by Gender"
+        )+scale_fill_manual(name = "Gender", values = c("blue", "red"), labels = c("blue" = "Male", "red" = "Female"))+theme_minimal()
+    }
+    else{
+      dat <- results_all %>% 
+        filter(M.F==input$genderfilter2&agegroup==input$agefilter2&Year==input$yearfilter3) %>%
+        select(Name, qualifier, ChangeHalf) 
+      ggplot(dat, aes(x=ChangeHalf))+geom_histogram(data = subset(dat, qualifier=="Qualifier"),aes(
+        fill="red"), alpha=.4)+geom_histogram(data = subset(dat, qualifier=="Not Qualifier"),aes(
+          fill="blue"), alpha=.4)+labs(
+            x = "Percent Change in Pace From First to Second Half of Race", y = "Count",
+            title = "Pace Change by Qualification Status"
+          )+scale_fill_manual(name = "Qualifier", values = c("red", "blue"),
+                              labels = c("red" = "Qualifier","blue"= "Not Qualifier"))+theme_minimal()
+    }
+  })
+  
+  # tab 7 output: reactive function to get t-test results 
+  ttestout <- reactive({
+    if(input$comparison=="Age"){
+      data <- results_all %>% filter(agegroup==input$age1c|agegroup==input$age2c) %>%
+        filter(M.F==input$genderfilter&qualifier==input$qfilter&Year==input$yearfilter)
+      var1 <- data$ChangeHalf[data$agegroup==input$age1c]
+      var2 <- data$ChangeHalf[data$agegroup==input$age2c]}
+    else if(input$comparison=="Gender"){
+      data <- results_all %>% filter(agegroup==input$agefilter&qualifier==input$qfilter2&Year==input$yearfilter2)
+      var1 <- data$ChangeHalf[data$M.F=="M"]
+      var2 <- data$ChangeHalf[data$M.F=="F"]}
+    else{
+      data <- results_all %>% filter(M.F==input$genderfilter2&agegroup==input$agefilter2&Year==input$yearfilter3)
+      var1 <- data$ChangeHalf[data$qualifier=="Qualifier"]
+      var2 <- data$ChangeHalf[data$qualifier=="Not Qualifier"]
+    }
+    if (is.null(var1)){return(NULL)}
+    if (is.null(var2)){return(NULL)}
+    ve <- ifelse(input$varequal == 'y', TRUE, FALSE)
+    t2 <- t.test(var1, var2, alternative = input$tail, var.equal = ve)
+    return(t2)
+  })
+  
+  # tab 7 output: results from t-test based on input 
+  output$results <- renderTable({
+    if(input$comparison=="Age"){
+      data <- results_all %>% filter(agegroup==input$age1c|agegroup==input$age2c) %>%
+        filter(M.F==input$genderfilter&qualifier==input$qfilter&Year==input$yearfilter)
+      var1 <- data$ChangeHalf[data$agegroup==input$age1c]
+      var2 <- data$ChangeHalf[data$agegroup==input$age2c]
+      name1 <- input$age1c
+      name2 <- input$age2c}
+    else if(input$comparison=="Gender"){
+      data <- results_all %>% filter(agegroup==input$agefilter&qualifier==input$qfilter2&Year==input$yearfilter2)
+      var1 <- (data$ChangeHalf[data$M.F=="M"])
+      var2 <- (data$ChangeHalf[data$M.F=="F"])
+      name1 <- "Male"
+      name2 <- "Female"}
+    else{
+      data <- results_all %>% filter(M.F==input$genderfilter2&agegroup==input$agefilter2&Year==input$yearfilter3)
+      var1 <- (data$ChangeHalf[data$qualifier=="Qualifier"])
+      var2 <- (data$ChangeHalf[data$qualifier=="Not Qualifier"])
+      name1 <- "Qualifier"
+      name2 <- "Not Qualifier"
+    }
+    mean1 <- mean(var1, na.rm=T)
+    mean2 <- mean(var2, na.rm=T)
+    diff <- mean1-mean2
+    vals <- ttestout()
+    if (is.null(vals)){return(NULL)}
+    pval = vals$p.value
+    stat = vals$statistic
+    res <- data.frame("Difference" = diff, "Test Statistic" = stat, "P Value" = pval)
+    return(res)
+  })
+  
+  # tab 7 output: summary statistics table 
+  output$parametric <- renderTable({
+    if(input$comparison=="Age"){
+      data <- results_all %>% filter(agegroup==input$age1c|agegroup==input$age2c) %>%
+        filter(M.F==input$genderfilter&qualifier==input$qfilter&Year==input$yearfilter)
+      var1 <- data$ChangeHalf[data$agegroup==input$age1c]
+      var2 <- data$ChangeHalf[data$agegroup==input$age2c]
+      name1 <- input$age1c
+      name2 <- input$age2c}
+    else if(input$comparison=="Gender"){
+      data <- results_all %>% filter(agegroup==input$agefilter&qualifier==input$qfilter2&Year==input$yearfilter2)
+      var1 <- (data$ChangeHalf[data$M.F=="M"])
+      var2 <- (data$ChangeHalf[data$M.F=="F"])
+      name1 <- "Male"
+      name2 <- "Female"}
+    else{
+      data <- results_all %>% filter(M.F==input$genderfilter2&agegroup==input$agefilter2&Year==input$yearfilter3)
+      var1 <- (data$ChangeHalf[data$qualifier=="Qualifier"])
+      var2 <- (data$ChangeHalf[data$qualifier=="Not Qualifier"])
+      name1 <- "Qualifier"
+      name2 <- "Not Qualifier"
+    }
+    mean1 <- mean(var1, na.rm=T)
+    mean2 <- mean(var2, na.rm=T)
+    standard_deviation1 <- sd(var1, na.rm=T)
+    standard_deviation2 <- sd(var2, na.rm=T)
+    standard_error1 <- sd(var1, na.rm=T)/sqrt(length(var1))
+    standard_error2 <- sd(var2, na.rm=T)/sqrt(length(var2))
+    parametric1 <- data.frame(Variable = name1, Mean = mean1, 
+                              SD =standard_deviation1, 
+                              SE =standard_error1, n = length(var1))
+    parametric2 <- data.frame(Variable = name2, Mean = mean2, 
+                              SD =standard_deviation2, 
+                              SE =standard_error2, n = length(var2))
+    return(rbind(parametric1,parametric2))
+  })
+
+  # tab 8 output: reactive function to get linear regression output 
+  lmout <- reactive({
+    model <- lm(as.formula(paste("Official.Time","~",paste(input$explanvars, collapse="+"))), data=results_all)
+  })
+  
+  # tab 8 output: reactive function to get linear model prediction output 
+  lmpred <- reactive({
+    new <- data.frame("Age" = input$agepred, "agegroup" = input$agegpred, "M.F" = input$genpred, "First5k" = input$timepred,
+                      "qualifier" = input$qpred, "Year" = input$ypred, "US_Citizen" = input$cpred)
+    return(predict(lmout(), newdata=new))
+  })
+  
+  # tab 8 output: print predicted finish time 
+  output$pred <- renderPrint({
+    if(!is.null(input$explanvars)){
+      as.numeric(round(lmpred()/60, 2))}
+  })
+  
+  # tab 8 output: linear regression summary
+  output$summary <- renderPrint({
+    if(!is.null(input$explanvars)){
+      summary(lmout())
+    }
+  })
+  
+  # tab 8 output: adjusted r^2
+  output$ar2 <- renderPrint({
+    if(!is.null(input$explanvars)){
+      summary(lmout())$adj.r.squared}
+  })
+},
+
+  options = list(height = 500)
+)
+```
+
+## Visualizations: Demographics
+
+The shiny app allows for many different visualizations of race results. Possible visualizations include: 
+
+* Compare distributions of finish times by gender
+* Compare qualification status by gender
+* Compare qualification status by age group
+* Compare gender by age group
+* Compare age group by gender
+* Compare finish times by year for a specified age group and qualifying status
+
+
+## Visualizations: Pacing
+One question I wanted to explore was how pacing strategies differed across different groups. I created boxplots that show the percent change in pace by each five-kilometer segment and allow the user to compare genders, age groups, and qualifiers. The resulting visualizations are boxplots of the distributions of percent change in pace from the previous five kilometer segment. Users can compare age groups within a gender and qualification status, qualifiers within a gender and age group, and genders within an age group and qualification status. 
+
+## Analysis: Hypothesis Testing 
+To investigate differences between pacing strategies of different groups, functionality to run t-tests was created. Pacing strategy was simplified to the percent difference in pace between the first half of the race and the second half of the race. For example, if a runner ran the first 13.1 miles at 8:00 pace and the second 13.1 miles at 9:00 pace, the runner's percent change would be -12.5%. With this method, a positive percent change indicates the runner getting faster in the second half of the race. The null hypothesis for each test is there is no difference in the percent change in pace from the first to the second half of the marathon between group A and group B. The alternative hypothesis is the percent change in pace from the first to the second half of the marathon is (greater than, less than, or not equal) between group A and group B. For example, if we wanted to compare genders, we stratify by year and qualification status. Then, one possible null hypthesis could be: there is no difference in the percent change in pace from the first to the second half of the marathon between 18-34 year-old qualifying men and women in 2011. \newline 
+The user can select whether the alternative should test whether the groups are equal or the difference is negative or positive and select whether the groups should have equal variance. A few findings of interest from the hypothesis testing: 
+
+* Regardless of gender, qualification status, age, or year, on average, runners are slower in the second half of the race than the first half of the race
+* On average, women slow down less than men in the second half of the race, but the magnitude and statistical significance of the difference depends on the year. For example, in 2016, men were 12% slower in the second half of the race
+* This pattern holds across most age groups and years. One hypothesis to explain this difference is that women are on average more conservative about their pacing strategy 
+* The difference between men and women is more pronounced among non-qualifiers than qualifiers. Below is the difference between men and women from 2017 among qualifiers compared to non-qualifiers.
+* Among both women and men, there doesn't appear to be a large difference in pacing strategy between different age groups for either qualifiers or non-qualifiers
+* Sometimes, older runners exhibit more even pacing than younger runners , but while the differences are statistically significant, the effect sizes are not as large as those for differences between genders 
+* Across all ages, genders, and years, qualifiers are significantly more consistent pacers than non-qualifiers. One hypothesis to explain this difference is that qualifiers are more experienced runners and better at running consistent pace throughout a marathon.
+
+
+## Analysis: Linear Regression
+To investigate (1) which variables contribute to marathon time and (2) in which direction and how much these variables impact marathon time, functionality to test different linear regressions was implemented. Users can select any combination of variables to include in the linear regression model and view the output and adjusted R2 of the model. Users can also predict a marathon time given their model by entering values for each of the predictors in the model.
+\newline 
+Some interesting findings from linear regression: 
+
+* Age: After controlling for gender, year of the race, qualification status, and US citizenship, a one year increase in age is associated with, on average, a 1.2 minute increase in marathon finish time 
+* Gender: After controlling for year of the race, qualification status, US citizenship, and age, being male is associated with, on average, a 30 minute decrease in marathon finish time 
+* US Citizenship: After controlling for year of the race, qualification status, gender, and age, being a US citizen is associated with, on average, a 4 minute increase in marathon finish time 
+* Qualification Status: After controlling for year of the race, US citizenship, gender, and age, being a qualifier is associated with, on average, a 62 minute decrease in marathon finish time 
+* Year of the Race: After controlling for US citizenship, gender, age, and qualification status, running in the year 2018 is associated with a 5 minute increase in marathon finish time. This makes sense; the weather in 2018 was heavy rain, wind, and cold. 
+* Prediction: sing age, qualification status, US citizenship, year of the race, and gender, we can predict finish time and achieve an $R^2$ of 0.64. This simple model could serve as a jumping off point for more complex models to predict marathon finish time 
+
+## Conclusion
+The Shiny app created allows users to explore dozens of visualizations of Boston marathon pacing and demogrpahic data and perform basic analysis, inference, and prediction with t-tests and linear regression. This app could serve as a great starting point for more detailed and complex analysis with more years of data. 
